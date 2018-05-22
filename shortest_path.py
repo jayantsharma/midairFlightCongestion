@@ -18,15 +18,33 @@ def neighbors(u, shape):
     return neighbors
 
 
-def shortest_path(s,t,u_wnd_matrix,v_wnd_matrix):
+# return Haversine Distance in meters
+def haversine_distance(lat1, lon1, lat2, lon2):
+    lat1 = np.radians(lat1)
+    lon1 = np.radians(lon1)
+    lat2 = np.radians(lat2)
+    lon2 = np.radians(lon2)
+
+    a = np.square(np.sin((lat1 - lat2)/2)) + np.cos(lat1) * np.cos(lat2) * np.square(np.sin((lon1 - lon2)/2))
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    R = 6371 * 1000
+    d = R * c
+    return d
+
+
+def shortest_path(s,t,u_wnd_matrix,v_wnd_matrix,lats,lons):
     shape = u_wnd_matrix.shape
     num_rows, num_cols = shape
 
     # keep track of distances
     dist = np.full(shape, float('inf'))
     dist[s] = 0
-    # cost of moving a unit distance - important to keep all edge weights positive
-    unit_movement_cost = 100
+
+    # Cost of moving a unit distance
+    # Take avg airplane speed to be 400 knots ~ 205 m/s
+    # unit_cost (time taken to move 1 meter) = 1/205
+    airplane_speed = 205        # 400 knots in m/s
+    movement_unit_cost = 1/airplane_speed    
 
     # keep track of parents 
     parents = [ [ None ] * num_cols for _ in range(num_rows) ]
@@ -44,6 +62,7 @@ def shortest_path(s,t,u_wnd_matrix,v_wnd_matrix):
                     t = parents[t[0]][t[1]]
                 return d, path[::-1]
             reached.add(u)
+            if len(reached) % 50 == 0:  print(len(reached), min(reached, key=lambda x: x[0] ** 2 + x[1] ** 2))
             nbrs = neighbors(u, shape)
             for nbr in nbrs:
                 if nbr not in reached:
@@ -51,24 +70,55 @@ def shortest_path(s,t,u_wnd_matrix,v_wnd_matrix):
                     # wind_resistance_cost = (wind_matrix[u] + wind_matrix[nbr])/2.
 
                     # Intended direction of movement - center -> center
-                    movement_vec = np.array(nbr) - np.array(u)
+                    heading_vec = np.array(nbr) - np.array(u)
+                    heading_unit_vec = heading_vec / np.linalg.norm(heading_vec)
+                    heading_distance = haversine_distance(lats[nbr], lons[nbr], lats[u], lons[u])
 
                     # Wind vector gotten by averaging across the 2 cells
                     u_wnd = (u_wnd_matrix[u] + u_wnd_matrix[nbr])/2.
                     v_wnd = (v_wnd_matrix[u] + v_wnd_matrix[nbr])/2.
                     wind_vec = np.array((u_wnd, v_wnd))
+                    wind_unit_vec = wind_vec / np.linalg.norm(wind_vec)
 
-                    # Heading + Wind = Motion/movement vector (Relative Motion!!)
-                    heading_vec = movement_vec - wind_vec
+                    # grid search
+                    phi = np.arctan2(heading_unit_vec[1], heading_unit_vec[0])
+                    min_res = float('inf')
+                    for theta in np.arange(-np.pi, np.pi, .1):
+                        j_comp = airplane_speed * np.sin(theta) + v_wnd
+                        i_comp = airplane_speed * np.cos(theta) + u_wnd
+                        theta = np.arctan2(j_comp, i_comp)
+                        res = np.abs(theta - phi)
+                        if res < min_res:
+                            min_res = res
+                            min_theta = theta
 
-                    # Cost = movement_cost + wind_resistance_cost
-                    # movement_cost = distance * unit_cost = norm(heading) * unit_cost
-                    movement_cost = np.linalg.norm(heading_vec) * unit_movement_cost
-                    # wind_resistance_cost = resistance offered in direction of heading = - dot_product
-                    unit_heading_vec = heading_vec / np.linalg.norm(heading_vec)
-                    wind_resistance_cost = -np.dot(unit_heading_vec, wind_vec)
+                    movement_unit_vec = np.array((np.cos(min_theta), np.sin(min_theta)))
+                    movement_vec = airplane_speed * movement_unit_vec
+                    heading_vec_ = movement_vec + wind_vec
+                    try:
+                        assert np.dot(heading_vec_, heading_unit_vec) > 0
+                    except AssertionError:
+                        import ipdb; ipdb.set_trace()
+                    heading_speed = np.linalg.norm(heading_vec_)
 
-                    wt = movement_cost + wind_resistance_cost
+                    wt = heading_distance / heading_speed
+
+                    ## Movement + Wind = Heading (Relative Motion!!)
+                    # movement_unit_vec = heading_unit_vec - wind_unit_vec
+                    # movement_unit_vec = movement_unit_vec / np.linalg.norm(movement_unit_vec)
+                    ## How many meters would I move in movement direction to move 1 meter in heading direction ?
+                    # num_movement_units_per_heading_unit = 1 / np.dot(movement_unit_vec, heading_unit_vec)
+                    # num_movement_units = heading_distance * num_movement_units_per_heading_unit
+                    # movement_cost = num_movement_units * movement_unit_cost
+
+                    ## Cost = movement_cost + wind_resistance_cost
+                    ## wind_resistance_cost = resistance offered in direction of heading = - dot_product
+                    # wind_resistance_cost_per_unit_movement = -np.dot(movement_unit_vec, wind_vec)
+                    # wind_resistance_cost = wind_resistance_cost_per_unit_movement * num_movement_units
+
+                    # The way formulae have been written, all costs should be in seconds
+
+                    # wt = movement_cost + wind_resistance_cost
                     d_nbr = dist[u] + wt
                     if dist[nbr] > d_nbr:
                         dist[nbr] = d_nbr
@@ -106,7 +156,7 @@ def extract_shortest_path(fname, level=850):
     t = grid_label(dest_coords, lats, lons)
     print('Los Angeles : {}'.format(t))
 
-    dist, path = shortest_path(s, t, u_wnd_matrix, v_wnd_matrix)
+    dist, path = shortest_path(s, t, u_wnd_matrix, v_wnd_matrix, lats, lons)
     lats = np.array([lats[p] for p in path])
     lons = np.array([lons[p] for p in path])
     return dist, lats, lons
