@@ -10,11 +10,18 @@ from datetime import timedelta
 
 import ipdb
 import sys
+import os
+from subprocess import call 
 
 from mpl_toolkits.basemap import Basemap
 import matplotlib.pyplot as plt
 
 from shortest_path import JFK, LAX, grid_label, step_cost, neighbors, haversine_distance
+
+
+GRIBFILES_DIR = 'weather_data/hrrr'
+PREFIX = 'https://pando-rgw01.chpc.utah.edu/hrrr/sfc/'
+SUFFIX = '.wrfsfcf00.grib2'
 
 
 def read_gribfile(grib_fname, level=850):
@@ -42,7 +49,7 @@ def distance(m, c, x, y):
         return np.abs(y - m*x - c) / sqrt(m ** 2 + 1)
 
 
-def breakdown_and_compute_cost(segment, shape):
+def breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats, lons):
     orig, orig_grid_label = segment[0]
     dest, dest_grid_label = segment[1]
 
@@ -112,17 +119,36 @@ def path_cost(path, u_wnd_matrix, v_wnd_matrix, lats, lons):
     return sum(step_cost(u, nbr, u_wnd_matrix, v_wnd_matrix, lats, lons) for (u,nbr) in zip(path[:-1], path[1:]))
 
 
-if __name__ == '__main__':
-    # 15 Feb '18 - Hour 12 Forecast 00
-    grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
-    json_dump = 'airlineFlightSchedule_JFK_LAX.json'
-    flights = json.load(open(json_dump))
-    print('Load JSON complete')
-    flight = flights[0]
-    track = flight['track']
+def download_and_get_gribfile(midflighttime):
+    # Link of the type : https://pando-rgw01.chpc.utah.edu/hrrr/sfc/20180213/hrrr.t01z.wrfsfcf00.grib2
+    dt = midflighttime.strftime('%Y%m%d')
+    hr = round(midflighttime.hour + midflighttime.minute/60)
+    hr = 't{:02d}z'.format(hr)
+    link = PREFIX + dt + '/hrrr.' + hr + SUFFIX
 
-    u_wnd_matrix, v_wnd_matrix, lats, lons = read_gribfile(grib_fname)
+    dir_ = GRIBFILES_DIR + '/{}'.format(dt)
+    try:
+        os.listdir(dir_)
+    except:
+        os.makedirs(dir_)
+    fname = '{}.grib2'.format(hr)
+    loc = dir_ + '/' + fname
+
+    if not os.path.exists(loc):
+        call(['wget', '-O', loc, link])
+
+    return loc
+
+
+def calculate_actual_path_cost(flight):
+    track = flight['track']
+    midflighttime = (flight['departuretime'] + flight['arrivaltime']) / 2
+    midflighttime = datetime.fromtimestamp(midflighttime)
+
+    grib_file = download_and_get_gribfile(midflighttime)
+    u_wnd_matrix, v_wnd_matrix, lats, lons = read_gribfile(grib_file)
     shape = u_wnd_matrix.shape
+    # import ipdb; ipdb.set_trace()
     
     waypoints = [ ((waypoint['longitude'], waypoint['latitude'])) for waypoint in track ]
     # reverse lat/lon before passing as arg
@@ -133,55 +159,59 @@ if __name__ == '__main__':
     total_path_cost = 0
     path_lengths = []
     bar = Bar('Processing', max = len(waypoints)-1, suffix='%(percent).1f%% - %(eta)ds')
-    # s = 0
-    # t = 0
-    # for segment in segments:
-    #     (_, pt1), (_, pt2) = segment
-    #     s += sqrt( (pt1[0] - pt2[0]) ** 2 + (pt1[1] - pt2[1]) ** 2 )
-    #     t += sqrt( (u_wnd_matrix[pt1] - u_wnd_matrix[pt2]) ** 2 + (v_wnd_matrix[pt1] - v_wnd_matrix[pt2]) ** 2 )
-    # print(s/(len(waypoints)-1))
-    # 2.553455541866519
-    # print(t/(len(waypoints)-1), np.mean(u_wnd_matrix), np.mean(v_wnd_matrix))
-    # 0.37669023296560683 6.5815034 2.8413393
-    # sys.exit()
     for segment in segments:
-        path_cost, path_length = breakdown_and_compute_cost(segment, shape)
+        path_cost, path_length = breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats, lons)
         total_path_cost += path_cost
         path_lengths.append(path_length)
         bar.next()
     bar.finish()
     print(total_path_cost)
-    print(sum(path_lengths)-len(waypoints), grid_label(LAX, lats, lons), grid_label(JFK, lats, lons))
+    return total_path_cost
+    # print(sum(path_lengths)-len(waypoints), grid_label(LAX, lats, lons), grid_label(JFK, lats, lons))
 
-    departuretime = flight['departuretime']
-    departuretime = datetime.fromtimestamp(departuretime) - timedelta(hours=5)
-    arrivaltime = flight['arrivaltime']
-    arrivaltime = datetime.fromtimestamp(arrivaltime) - timedelta(hours=5)
-    time_taken = arrivaltime - departuretime
-    print('Actual time taken: {}'.format(time_taken.seconds))
+    # departuretime = flight['departuretime']
+    # departuretime = datetime.fromtimestamp(departuretime) - timedelta(hours=5)
+    # arrivaltime = flight['arrivaltime']
+    # arrivaltime = datetime.fromtimestamp(arrivaltime) - timedelta(hours=5)
+    # time_taken = arrivaltime - departuretime
+    # print('Actual time taken: {}'.format(time_taken.seconds))
 
-    m = Basemap(llcrnrlon = -130,llcrnrlat = 20, urcrnrlon = -70,
-               urcrnrlat = 52 , projection = 'merc', area_thresh =10000 ,
-               resolution='l')
-    m.drawcoastlines()
-    m.drawcountries()
-    m.fillcontinents(color = 'coral')
-    m.drawmapboundary()
-    my_p = m.drawparallels(np.arange(20,80,4),labels=[1,1,0,0])
-    my_m = m.drawmeridians(np.arange(-140,-60,4),labels=[0,0,0,1])
+    # m = Basemap(llcrnrlon = -130,llcrnrlat = 20, urcrnrlon = -70,
+    #            urcrnrlat = 52 , projection = 'merc', area_thresh =10000 ,
+    #            resolution='l')
+    # m.drawcoastlines()
+    # m.drawcountries()
+    # m.fillcontinents(color = 'coral')
+    # m.drawmapboundary()
+    # my_p = m.drawparallels(np.arange(20,80,4),labels=[1,1,0,0])
+    # my_m = m.drawmeridians(np.arange(-140,-60,4),labels=[0,0,0,1])
 
 
-    points = [ pt for (pt,_) in waypoints ]
-    lons = [ pt[0] for pt in points ]
-    lats = [ pt[1] for pt in points ]
-    # plot airports
-    x,y = m([JFK[1], LAX[1]], [JFK[0], LAX[0]])
-    m.plot(x, y, 'ro', markersize=10)
-    # plot route
-    x,y = m(lons, lats)
-    m.plot(x, y, 'bo', markersize=1)
+    # points = [ pt for (pt,_) in waypoints ]
+    # lons = [ pt[0] for pt in points ]
+    # lats = [ pt[1] for pt in points ]
+    # # plot airports
+    # x,y = m([JFK[1], LAX[1]], [JFK[0], LAX[0]])
+    # m.plot(x, y, 'ro', markersize=10)
+    # # plot route
+    # x,y = m(lons, lats)
+    # m.plot(x, y, 'bo', markersize=1)
 
-    # day = grib_fname.split('_')[0]
-    # time = grib_fname.split('.')[1]
-    # plt.savefig('flight_path_{}_{}.png'.format(day, time), bbox_inches='tight')
-    plt.show()
+    # # day = grib_fname.split('_')[0]
+    # # time = grib_fname.split('.')[1]
+    # # plt.savefig('flight_path_{}_{}.png'.format(day, time), bbox_inches='tight')
+    # plt.show()
+
+
+if __name__ == '__main__':
+    # 15 Feb '18 - Hour 12 Forecast 00
+    grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
+    json_dump = 'airlineFlightSchedule_JFK_LAX.json'
+    flights = json.load(open(json_dump))
+    print('Load JSON complete')
+    res = {}
+    for flight in flights:
+        ident = (flight['actual_ident'], flight['departuretime']) if flight.get('actual_ident') else (flight['ident'], flight['departuretime'])
+        cost = calculate_actual_path_cost(flight)
+        res[ident] = cost
+        import ipdb; ipdb.set_trace()
