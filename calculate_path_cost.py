@@ -4,7 +4,7 @@ import numpy as np
 from math import sqrt
 import random
 from progress.bar import Bar
-import json
+import json, pickle
 from datetime import datetime
 from datetime import timedelta
 
@@ -16,21 +16,26 @@ from subprocess import call
 from mpl_toolkits.basemap import Basemap
 import matplotlib.pyplot as plt
 
-from shortest_path import JFK, LAX, grid_label, step_cost, neighbors, haversine_distance
+from shortest_path import JFK, LAX, grid_label, step_cost, neighbors, haversine_distance, extract_shortest_path
 
 
 GRIBFILES_DIR = 'weather_data/hrrr'
-PREFIX = 'https://pando-rgw01.chpc.utah.edu/hrrr/sfc/'
-SUFFIX = '.wrfsfcf00.grib2'
+PREFIX = 'https://pando-rgw01.chpc.utah.edu/hrrr/prs/'
+SUFFIX = '.wrfprsf00.grib2'
+LEVEL = 250
 
 
-def read_gribfile(grib_fname, level=850):
+def read_gribfile(grib_fname, level=LEVEL):
     myfile = pygrib.open(grib_fname)
 
-    u_grb = myfile.select(name='U component of wind', typeOfLevel='isobaricInhPa', level=level)[0]
+    try:
+        u_grb = myfile.select(name='U component of wind', typeOfLevel='isobaricInhPa', level=level)[0]
+    except:
+        import ipdb; ipdb.set_trace()
     # Shape - (1059, 1799)
     u_wnd_matrix = u_grb.values
     lats, lons = u_grb.latlons()
+    assert lats.shape == (1059, 1799)
 
     v_grb = myfile.select(name='V component of wind', typeOfLevel='isobaricInhPa', level=level)[0]
     v_wnd_matrix = v_grb.values
@@ -54,6 +59,9 @@ def breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats,
     dest, dest_grid_label = segment[1]
 
     direction_vec = np.array((dest[0]-orig[0], dest[1]-orig[1]))
+    if np.linalg.norm(direction_vec) == 0:
+        # repeat points, zero cost obvs
+        return 0, 0
     direction_vec = direction_vec / np.linalg.norm(direction_vec)
     
     # line of motion params
@@ -107,10 +115,7 @@ def breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats,
                 if dist < min_dist:
                     move_to = nbr
                     min_dist = dist
-        try:
-            total_cost += step_cost(u, move_to, u_wnd_matrix, v_wnd_matrix, lats, lons)
-        except:
-            ipdb.set_trace()
+        total_cost += step_cost(u, move_to, u_wnd_matrix, v_wnd_matrix, lats, lons)
         u = move_to
         path.append(move_to)
 
@@ -123,6 +128,9 @@ def download_and_get_gribfile(midflighttime):
     # Link of the type : https://pando-rgw01.chpc.utah.edu/hrrr/sfc/20180213/hrrr.t01z.wrfsfcf00.grib2
     dt = midflighttime.strftime('%Y%m%d')
     hr = round(midflighttime.hour + midflighttime.minute/60)
+    if hr == 24:
+        hr = 0
+        dt = (midflighttime + timedelta(days=1)).strftime('%Y%m%d')
     hr = 't{:02d}z'.format(hr)
     link = PREFIX + dt + '/hrrr.' + hr + SUFFIX
 
@@ -158,13 +166,13 @@ def calculate_actual_path_cost(flight):
     segments = zip(waypoints[:-1], waypoints[1:])
     total_path_cost = 0
     path_lengths = []
-    bar = Bar('Processing', max = len(waypoints)-1, suffix='%(percent).1f%% - %(eta)ds')
+    # bar = Bar('Processing', max = len(waypoints)-1, suffix='%(percent).1f%% - %(eta)ds')
     for segment in segments:
         path_cost, path_length = breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats, lons)
         total_path_cost += path_cost
         path_lengths.append(path_length)
-        bar.next()
-    bar.finish()
+        # bar.next()
+    # bar.finish()
     print(total_path_cost)
     return total_path_cost
     # print(sum(path_lengths)-len(waypoints), grid_label(LAX, lats, lons), grid_label(JFK, lats, lons))
@@ -203,14 +211,40 @@ def calculate_actual_path_cost(flight):
     # plt.show()
 
 
+def calculate_shortest_path(flight):
+    midflighttime = (flight['departuretime'] + flight['arrivaltime']) / 2
+    midflighttime = datetime.fromtimestamp(midflighttime)
+    grib_file = download_and_get_gribfile(midflighttime)
+
+    cost, lats, lons = extract_shortest_path(grib_file, level=LEVEL)
+    return cost, lats, lons
+
+
 if __name__ == '__main__':
     # 15 Feb '18 - Hour 12 Forecast 00
     # grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
-    json_dump = 'tracks_JFK_LAX_may17-31.json'
-    flights = json.load(open(json_dump))
+    data_dump = 'tracks_JFK_LAX_may17-31.pkl'
+    flights = pickle.load(open(data_dump, 'rb'))
     print('Load JSON complete')
     res = {}
-    for id_, flight in flights.items():
-        cost = calculate_actual_path_cost(flight)
-        flights[id_]['actual_path_cost'] = cost
-        import ipdb; ipdb.set_trace()
+    i = 0
+
+    mul = 3
+    inc = 86
+    offset = mul * inc
+    limit = min(offset + inc, len(flights))
+    data_dump = 'tracks_JFK_LAX_may17-31_{}-{}.pkl'.format(offset,limit)
+
+    for id_, flight in list(flights.items())[offset:limit]:
+        # cost = calculate_actual_path_cost(flight)
+        cost, lats, lons = calculate_shortest_path(flight)
+
+        flights[id_]['shortest_path_cost'] = cost
+        flights[id_]['shortest_path_details'] = { 'lats': lats, 'lons': lons }
+
+        i += 1
+        if i % 1 == 0:
+            print('{}/{} DONE'.format(i, limit - offset))
+            pickle.dump(flights, open(data_dump, 'wb'))
+            print('PKL written')
+    pickle.dump(flights, open(data_dump, 'wb'))
