@@ -205,13 +205,12 @@ def calculate_actual_path_cost(flight):
 
 if __name__ == '__main__':
     # 15 Feb '18 - Hour 12 Forecast 00
-    grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
-    json_dump = 'airlineFlightSchedule_JFK_LAX.json'
+    # grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
+    json_dump = 'tracks_JFK_LAX_may17-31.json'
     flights = json.load(open(json_dump))
     print('Load JSON complete')
     res = {}
-    for flight in flights:
-        ident = (flight['actual_ident'], flight['departuretime']) if flight.get('actual_ident') else (flight['ident'], flight['departuretime'])
+    for id_, flight in flights.items():
         cost = calculate_actual_path_cost(flight)
-        res[ident] = cost
+        flights[id_]['actual_path_cost'] = cost
         import ipdb; ipdb.set_trace()
