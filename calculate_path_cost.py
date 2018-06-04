@@ -161,7 +161,7 @@ def calculate_actual_path_cost(flight):
     waypoints = [ ((waypoint['longitude'], waypoint['latitude'])) for waypoint in track ]
     # reverse lat/lon before passing as arg
     waypoints = [ (pt, grid_label((pt[1], pt[0]), lats, lons)) for pt in waypoints ]
-    print('GRID placement complete')
+    # print('GRID placement complete')
     # makes slope calculations easier
     segments = zip(waypoints[:-1], waypoints[1:])
     total_path_cost = 0
@@ -211,6 +211,37 @@ def calculate_actual_path_cost(flight):
     # plt.show()
 
 
+def calculate_planned_path_cost(flight):
+    track = flight.get('planned_route')
+    if track is None:
+        print('Planned route absent')
+        return 0
+    midflighttime = (flight['departuretime'] + flight['arrivaltime']) / 2
+    midflighttime = datetime.fromtimestamp(midflighttime)
+
+    grib_file = download_and_get_gribfile(midflighttime)
+    u_wnd_matrix, v_wnd_matrix, lats, lons = read_gribfile(grib_file)
+    shape = u_wnd_matrix.shape
+    # import ipdb; ipdb.set_trace()
+    
+    waypoints = [ ((waypoint['longitude'], waypoint['latitude'])) for waypoint in track ]
+    # reverse lat/lon before passing as arg
+    waypoints = [ (pt, grid_label((pt[1], pt[0]), lats, lons)) for pt in waypoints ]
+    # print('GRID placement complete')
+    # makes slope calculations easier
+    segments = zip(waypoints[:-1], waypoints[1:])
+    total_path_cost = 0
+    path_lengths = []
+    # bar = Bar('Processing', max = len(waypoints)-1, suffix='%(percent).1f%% - %(eta)ds')
+    for segment in segments:
+        path_cost, path_length = breakdown_and_compute_cost(segment, shape, u_wnd_matrix, v_wnd_matrix, lats, lons)
+        total_path_cost += path_cost
+        path_lengths.append(path_length)
+        # bar.next()
+    # bar.finish()
+    return total_path_cost
+
+
 def calculate_shortest_path(flight):
     midflighttime = (flight['departuretime'] + flight['arrivaltime']) / 2
     midflighttime = datetime.fromtimestamp(midflighttime)
@@ -221,30 +252,37 @@ def calculate_shortest_path(flight):
 
 
 if __name__ == '__main__':
-    # 15 Feb '18 - Hour 12 Forecast 00
-    # grib_fname = 'feb12_hrrr.t12z.wrfsfcf00.grib2'
     data_dump = 'tracks_JFK_LAX_may17-31.pkl'
     flights = pickle.load(open(data_dump, 'rb'))
     print('Load JSON complete')
     res = {}
     i = 0
 
-    mul = 3
-    inc = 86
-    offset = mul * inc
-    limit = min(offset + inc, len(flights))
-    data_dump = 'tracks_JFK_LAX_may17-31_{}-{}.pkl'.format(offset,limit)
+    # mul = 3
+    # inc = 86
+    # offset = mul * inc
+    # limit = min(offset + inc, len(flights))
+    # data_dump = 'tracks_JFK_LAX_may17-31_{}-{}.pkl'.format(offset,limit)
+    offset = 0
+    limit = len(flights)
+    diffs = []
 
     for id_, flight in list(flights.items())[offset:limit]:
         # cost = calculate_actual_path_cost(flight)
-        cost, lats, lons = calculate_shortest_path(flight)
 
-        flights[id_]['shortest_path_cost'] = cost
-        flights[id_]['shortest_path_details'] = { 'lats': lats, 'lons': lons }
+        # cost, lats, lons = calculate_shortest_path(flight)
+        # flights[id_]['shortest_path_cost'] = cost
+        # flights[id_]['shortest_path_details'] = { 'lats': lats, 'lons': lons }
+
+        cost = calculate_planned_path_cost(flight)
+        flights[id_]['planned_path_cost'] = cost
+        diff = cost - flight['actual_path_cost']
+        diffs.append(diff)
+        print('{} ({}) > {}'.format(cost, len(flight.get('planned_route', [])), diff))
 
         i += 1
-        if i % 1 == 0:
+        if i % 10 == 0:
             print('{}/{} DONE'.format(i, limit - offset))
             pickle.dump(flights, open(data_dump, 'wb'))
-            print('PKL written')
+            print('PKL written : avg_diff - {}'.format(sum(diffs) / len(diffs)))
     pickle.dump(flights, open(data_dump, 'wb'))
